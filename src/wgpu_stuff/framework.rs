@@ -10,7 +10,7 @@ use winit::{
     window::Window,
 };
 
-pub trait Example: 'static + Sized {
+pub trait Sim: 'static + Sized {
     const SRGB: bool = true;
 
     fn optional_features() -> wgpu::Features {
@@ -50,6 +50,8 @@ pub trait Example: 'static + Sized {
     fn update(&mut self, event: WindowEvent);
 
     fn render(&mut self, view: &wgpu::TextureView, device: &wgpu::Device, queue: &wgpu::Queue);
+
+    fn simulate(&mut self, device: &wgpu::Device, queue: &wgpu::Queue);
 }
 
 // Initialize logging in platform dependant ways.
@@ -123,7 +125,7 @@ impl SurfaceWrapper {
     /// On all native platforms, this is where we create the surface.
     ///
     /// Additionally, we configure the surface based on the (now valid) window size.
-    fn resume(&mut self, context: &ExampleContext, window: Arc<Window>, srgb: bool) {
+    fn resume(&mut self, context: &SimContext, window: Arc<Window>, srgb: bool) {
         // Window size is only actually valid after we enter the event loop.
         let window_size = window.inner_size();
         let width = window_size.width.max(1);
@@ -160,7 +162,7 @@ impl SurfaceWrapper {
     }
 
     /// Resize the surface, making sure to not resize to zero.
-    fn resize(&mut self, context: &ExampleContext, size: PhysicalSize<u32>) {
+    fn resize(&mut self, context: &SimContext, size: PhysicalSize<u32>) {
         log::info!("Surface resize {size:?}");
 
         let config = self.config.as_mut().unwrap();
@@ -171,7 +173,7 @@ impl SurfaceWrapper {
     }
 
     /// Acquire the next surface texture.
-    fn acquire(&mut self, context: &ExampleContext) -> wgpu::SurfaceTexture {
+    fn acquire(&mut self, context: &SimContext) -> wgpu::SurfaceTexture {
         let surface = self.surface.as_ref().unwrap();
 
         match surface.get_current_texture() {
@@ -211,15 +213,15 @@ impl SurfaceWrapper {
 }
 
 /// Context containing global wgpu resources.
-struct ExampleContext {
+struct SimContext {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
 }
-impl ExampleContext {
+impl SimContext {
     /// Initializes the example context.
-    async fn init_async<E: Example>(surface: &mut SurfaceWrapper, window: Arc<Window>) -> Self {
+    async fn init_async<E: Sim>(surface: &mut SurfaceWrapper, window: Arc<Window>) -> Self {
         log::info!("Initializing wgpu...");
 
         let backends = wgpu::util::backend_bits_from_env().unwrap_or_default();
@@ -318,18 +320,18 @@ impl FrameCounter {
     }
 }
 
-async fn start<E: Example>(title: &str) {
+async fn start<E: Sim>(title: &str) {
     init_logger();
 
     log::debug!("Enabled backends: {:?}", wgpu::Instance::enabled_backend_features());
 
     let window_loop = EventLoopWrapper::new(title);
     let mut surface = SurfaceWrapper::new();
-    let context = ExampleContext::init_async::<E>(&mut surface, window_loop.window.clone()).await;
+    let context = SimContext::init_async::<E>(&mut surface, window_loop.window.clone()).await;
     let mut frame_counter = FrameCounter::new();
 
     // We wait to create the example until we have a valid surface.
-    let mut example = None;
+    let mut sim = None;
 
     let event_loop_function = EventLoop::run;
 
@@ -344,8 +346,8 @@ async fn start<E: Example>(title: &str) {
                     surface.resume(&context, window_loop.window.clone(), E::SRGB);
 
                     // If we haven't created the example yet, do so now.
-                    if example.is_none() {
-                        example = Some(
+                    if sim.is_none() {
+                        sim = Some(
                             E::init(
                                 surface.config(),
                                 &context.adapter,
@@ -362,8 +364,7 @@ async fn start<E: Example>(title: &str) {
                     match event {
                         WindowEvent::Resized(size) => {
                             surface.resize(&context, size);
-                            example
-                                .as_mut()
+                            sim.as_mut()
                                 .unwrap()
                                 .resize(surface.config(), &context.device, &context.queue);
 
@@ -388,7 +389,7 @@ async fn start<E: Example>(title: &str) {
                             // If this happens, just drop the requested redraw on the floor.
                             //
                             // See https://github.com/rust-windowing/winit/issues/3235 for some discussion
-                            if example.is_none() {
+                            if sim.is_none() {
                                 return;
                             }
 
@@ -402,16 +403,15 @@ async fn start<E: Example>(title: &str) {
                                 })
                             );
 
-                            example
-                                .as_mut()
-                                .unwrap()
-                                .render(&view, &context.device, &context.queue);
+                            sim.as_mut().unwrap().simulate(&context.device, &context.queue);
+
+                            sim.as_mut().unwrap().render(&view, &context.device, &context.queue);
 
                             frame.present();
 
                             window_loop.window.request_redraw();
                         }
-                        _ => example.as_mut().unwrap().update(event),
+                        _ => sim.as_mut().unwrap().update(event),
                     }
                 _ => {}
             }
@@ -419,25 +419,6 @@ async fn start<E: Example>(title: &str) {
     );
 }
 
-pub fn run<E: Example>(title: &'static str) {
+pub fn run<E: Sim>(title: &'static str) {
     pollster::block_on(start::<E>(title));
-}
-
-#[cfg(target_arch = "wasm32")]
-/// Parse the query string as returned by `web_sys::window()?.location().search()?` and get a
-/// specific key out of it.
-pub fn parse_url_query_string<'a>(query: &'a str, search_key: &str) -> Option<&'a str> {
-    let query_string = query.strip_prefix('?')?;
-
-    for pair in query_string.split('&') {
-        let mut pair = pair.split('=');
-        let key = pair.next()?;
-        let value = pair.next()?;
-
-        if key == search_key {
-            return Some(value);
-        }
-    }
-
-    None
 }
